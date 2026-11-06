@@ -1,0 +1,8 @@
+{
+  "expected_status": "approval_pending",
+  "documents": [
+    "claim_form",
+    "invoice",
+    "medical_report"
+  ]
+}

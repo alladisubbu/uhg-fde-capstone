@@ -1,0 +1,263 @@
+
+Starting case: e0abb73b-8fc1-4931-95ba-f28b9139fc90
+
+State before human approval:
+{
+  "case_id": "e0abb73b-8fc1-4931-95ba-f28b9139fc90",
+  "claim": {
+    "policy_number": "POL-10001",
+    "claimant_name": "John Test Customer",
+    "claimant_email": "claimant@lab.local",
+    "claim_type": "Health claim",
+    "claim_amount": 25000,
+    "incident_date": "2026-10-01",
+    "description": "Hospital treatment claim",
+    "covered": true,
+    "policy_citations": [
+      "Completed claim form, invoice and medical report required"
+    ]
+  },
+  "documents": [
+    {
+      "document_id": "DOC-001",
+      "file_name": "claim-form.txt",
+      "document_type": "claim_form",
+      "ocr_confidence": 0.99,
+      "injection_detected": false
+    },
+    {
+      "document_id": "DOC-002",
+      "file_name": "invoice.txt",
+      "document_type": "invoice",
+      "ocr_confidence": 0.98,
+      "injection_detected": false
+    },
+    {
+      "document_id": "DOC-003",
+      "file_name": "medical-report.txt",
+      "document_type": "medical_report",
+      "ocr_confidence": 0.97,
+      "injection_detected": false
+    }
+  ],
+  "document_results": [
+    {
+      "document_id": "DOC-001",
+      "file_name": "claim-form.txt",
+      "document_type": "claim_form",
+      "ocr_confidence": 0.99,
+      "injection_detected": false
+    },
+    {
+      "document_id": "DOC-002",
+      "file_name": "invoice.txt",
+      "document_type": "invoice",
+      "ocr_confidence": 0.98,
+      "injection_detected": false
+    },
+    {
+      "document_id": "DOC-003",
+      "file_name": "medical-report.txt",
+      "document_type": "medical_report",
+      "ocr_confidence": 0.97,
+      "injection_detected": false
+    }
+  ],
+  "messages": [
+    "Intake checks completed",
+    "Document processing completed",
+    "Grounded case summary prepared",
+    "Case assigned to approver@lab.local for approval",
+    "Approval SLA scheduled"
+  ],
+  "status": "approval_pending",
+  "next_step": "human_review",
+  "agent_hops": [
+    "intake",
+    "document",
+    "document",
+    "document",
+    "summary",
+    "routing",
+    "sla_comms"
+  ],
+  "stage_results": {
+    "intake": {
+      "duplicate": false,
+      "coverage_issue": false,
+      "risks": []
+    },
+    "documents": {
+      "low_confidence": false,
+      "injection_detected": false,
+      "missing_documents": []
+    },
+    "summary": {
+      "facts": [
+        "Case ID: e0abb73b-8fc1-4931-95ba-f28b9139fc90",
+        "Claim amount: 25000",
+        "Claim type: Health claim"
+      ],
+      "evidence": [
+        "claim-form.txt",
+        "invoice.txt",
+        "medical-report.txt"
+      ],
+      "missing_information": [],
+      "risks": [],
+      "policy_citations": [
+        "Completed claim form, invoice and medical report required"
+      ],
+      "next_action": "Route to a qualified adjuster and approver"
+    },
+    "routing": {
+      "adjuster": "adjuster@lab.local",
+      "approver": "approver@lab.local",
+      "approval_limit_checked": true
+    },
+    "sla_comms": {
+      "approval_sla_hours": 24,
+      "notification_required": true
+    }
+  },
+  "errors": [],
+  "failure_count": 0,
+  "token_usage": 0,
+  "__interrupt__": [
+    "Interrupt(value={'type': 'claim_approval', 'case_id': 'e0abb73b-8fc1-4931-95ba-f28b9139fc90', 'summary': {'facts': ['Case ID: e0abb73b-8fc1-4931-95ba-f28b9139fc90', 'Claim amount: 25000', 'Claim type: Health claim'], 'evidence': ['claim-form.txt', 'invoice.txt', 'medical-report.txt'], 'missing_information': [], 'risks': [], 'policy_citations': ['Completed claim form, invoice and medical report required'], 'next_action': 'Route to a qualified adjuster and approver'}, 'routing': {'adjuster': 'adjuster@lab.local', 'approver': 'approver@lab.local', 'approval_limit_checked': True}, 'allowed_decisions': ['approve', 'reject', 'request_information']}, id='9d30dd6fb1666459b8c957d8a7d05f3a', response_schema=None)"
+  ]
+}
+
+Resuming using a HUMAN decision...
+
+Final state:
+{
+  "case_id": "e0abb73b-8fc1-4931-95ba-f28b9139fc90",
+  "claim": {
+    "policy_number": "POL-10001",
+    "claimant_name": "John Test Customer",
+    "claimant_email": "claimant@lab.local",
+    "claim_type": "Health claim",
+    "claim_amount": 25000,
+    "incident_date": "2026-10-01",
+    "description": "Hospital treatment claim",
+    "covered": true,
+    "policy_citations": [
+      "Completed claim form, invoice and medical report required"
+    ]
+  },
+  "documents": [
+    {
+      "document_id": "DOC-001",
+      "file_name": "claim-form.txt",
+      "document_type": "claim_form",
+      "ocr_confidence": 0.99,
+      "injection_detected": false
+    },
+    {
+      "document_id": "DOC-002",
+      "file_name": "invoice.txt",
+      "document_type": "invoice",
+      "ocr_confidence": 0.98,
+      "injection_detected": false
+    },
+    {
+      "document_id": "DOC-003",
+      "file_name": "medical-report.txt",
+      "document_type": "medical_report",
+      "ocr_confidence": 0.97,
+      "injection_detected": false
+    }
+  ],
+  "document_results": [
+    {
+      "document_id": "DOC-001",
+      "file_name": "claim-form.txt",
+      "document_type": "claim_form",
+      "ocr_confidence": 0.99,
+      "injection_detected": false
+    },
+    {
+      "document_id": "DOC-002",
+      "file_name": "invoice.txt",
+      "document_type": "invoice",
+      "ocr_confidence": 0.98,
+      "injection_detected": false
+    },
+    {
+      "document_id": "DOC-003",
+      "file_name": "medical-report.txt",
+      "document_type": "medical_report",
+      "ocr_confidence": 0.97,
+      "injection_detected": false
+    }
+  ],
+  "messages": [
+    "Intake checks completed",
+    "Document processing completed",
+    "Grounded case summary prepared",
+    "Case assigned to approver@lab.local for approval",
+    "Approval SLA scheduled",
+    "Human decision recorded: approve",
+    "Claim workflow finalised after human decision"
+  ],
+  "status": "approved",
+  "next_step": "end",
+  "agent_hops": [
+    "intake",
+    "document",
+    "document",
+    "document",
+    "summary",
+    "routing",
+    "sla_comms",
+    "finalize"
+  ],
+  "stage_results": {
+    "intake": {
+      "duplicate": false,
+      "coverage_issue": false,
+      "risks": []
+    },
+    "documents": {
+      "low_confidence": false,
+      "injection_detected": false,
+      "missing_documents": []
+    },
+    "summary": {
+      "facts": [
+        "Case ID: e0abb73b-8fc1-4931-95ba-f28b9139fc90",
+        "Claim amount: 25000",
+        "Claim type: Health claim"
+      ],
+      "evidence": [
+        "claim-form.txt",
+        "invoice.txt",
+        "medical-report.txt"
+      ],
+      "missing_information": [],
+      "risks": [],
+      "policy_citations": [
+        "Completed claim form, invoice and medical report required"
+      ],
+      "next_action": "Route to a qualified adjuster and approver"
+    },
+    "routing": {
+      "adjuster": "adjuster@lab.local",
+      "approver": "approver@lab.local",
+      "approval_limit_checked": true
+    },
+    "sla_comms": {
+      "approval_sla_hours": 24,
+      "notification_required": true
+    }
+  },
+  "human_decision": {
+    "decision": "approve",
+    "rationale": "Evidence is complete and policy conditions are met.",
+    "approver": "approver@lab.local"
+  },
+  "errors": [],
+  "failure_count": 0,
+  "token_usage": 0
+}

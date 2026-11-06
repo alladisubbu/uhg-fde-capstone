@@ -1,0 +1,5 @@
+{
+  "claim_amount": 25000,
+  "document_amount": 35000,
+  "expected_risk": "amount mismatch"
+}

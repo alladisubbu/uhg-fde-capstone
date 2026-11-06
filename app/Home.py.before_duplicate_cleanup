@@ -1,0 +1,570 @@
+import uuid
+import streamlit as st
+from langgraph.types import Command
+from graph.claims_graph import build_graph
+
+st.set_page_config(
+    page_title="UHG Intelligent Claims",
+    layout="wide",
+)
+
+st.title("UHG Intelligent Claims Processing")
+st.caption("Human-controlled claim preparation and case management")
+
+if "graph" not in st.session_state:
+    st.session_state.graph = build_graph()
+
+if "case_config" not in st.session_state:
+    st.session_state.case_config = None
+
+if "last_state" not in st.session_state:
+    st.session_state.last_state = None
+
+st.info(
+    "Agents prepare evidence and recommendations. "
+    "Only an authorised person may decide a claim."
+)
+
+tab_submit, tab_case, tab_approval = st.tabs(
+    ["Submit Claim", "Case Workspace", "Human Approval"]
+)
+
+with tab_submit:
+    st.subheader("Submit a claim")
+
+    with st.form("claim_form"):
+        policy_number = st.text_input(
+            "Policy number",
+            value="POL-10001",
+        )
+
+        claimant_name = st.text_input(
+            "Claimant name",
+            value="John Test Customer",
+        )
+
+        claimant_email = st.text_input(
+            "Claimant email",
+            value="claimant@lab.local",
+        )
+
+        claim_type = st.selectbox(
+            "Claim type",
+            ["Health claim", "Experimental treatment"],
+        )
+
+        claim_amount = st.number_input(
+            "Claim amount",
+            min_value=1.0,
+            value=25000.0,
+        )
+
+        description = st.text_area(
+            "Description",
+            value="Hospital treatment claim",
+        )
+
+        uploaded_files = st.file_uploader(
+            "Upload claim form, invoice and medical report",
+            accept_multiple_files=True,
+        )
+
+        submitted = st.form_submit_button(
+            "Submit and process"
+        )
+
+    if submitted:
+        case_id = str(uuid.uuid4())
+        documents = []
+
+        for index, uploaded_file in enumerate(uploaded_files):
+            name = uploaded_file.name.lower()
+
+            if "claim" in name:
+                document_type = "claim_form"
+            elif "invoice" in name:
+                document_type = "invoice"
+            elif "medical" in name or "report" in name:
+                document_type = "medical_report"
+            else:
+                document_type = "unknown"
+
+            documents.append(
+                {
+                    "document_id": f"DOC-{index + 1:03d}",
+                    "file_name": uploaded_file.name,
+                    "document_type": document_type,
+                    "ocr_confidence": 0.95,
+                    "injection_detected": False,
+                }
+            )
+
+        initial_state = {
+            "case_id": case_id,
+            "claim": {
+                "policy_number": policy_number,
+                "claimant_name": claimant_name,
+                "claimant_email": claimant_email,
+                "claim_type": claim_type,
+                "claim_amount": claim_amount,
+                "description": description,
+                "covered": (
+                    claim_type != "Experimental treatment"
+                ),
+                "policy_citations": [
+                    "Policy coverage and claim documentation clauses"
+                ],
+            },
+            "documents": documents,
+            "status": "submitted",
+            "next_step": "intake",
+            "agent_hops": [],
+            "stage_results": {},
+            "errors": [],
+            "failure_count": 0,
+            "token_usage": 0,
+        }
+
+        config = {
+            "configurable": {
+                "thread_id": case_id,
+            },
+            "recursion_limit": 30,
+        }
+
+        with st.spinner("Running claim agents..."):
+            result = st.session_state.graph.invoke(
+                initial_state,
+                config=config,
+            )
+
+        st.session_state.case_config = config
+        st.session_state.last_state = result
+
+        st.success(
+            f"Claim processed. Case ID: {case_id}"
+        )
+
+
+with tab_case:
+    st.subheader("Case workspace")
+
+    if not st.session_state.last_state:
+        st.warning("Submit a claim first.")
+
+    else:
+        state = st.session_state.last_state
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Case ID",
+            state.get("case_id"),
+        )
+
+        col2.metric(
+            "Status",
+            state.get("status"),
+        )
+
+        col3.metric(
+            "Agent hops",
+            len(state.get("agent_hops", [])),
+        )
+
+        st.markdown("### Agent trajectory")
+
+        st.write(
+            " -> ".join(
+                state.get("agent_hops", [])
+            )
+        )
+
+        st.markdown("### Summary")
+
+        st.json(
+            state.get(
+                "stage_results",
+                {},
+            ).get(
+                "summary",
+                {},
+            )
+        )
+
+        st.markdown("### Routing")
+
+        st.json(
+            state.get(
+                "stage_results",
+                {},
+            ).get(
+                "routing",
+                {},
+            )
+        )
+
+        st.markdown("### Messages")
+
+        for message in state.get("messages", []):
+            st.write(f"- {message}")
+
+
+with tab_approval:
+    st.subheader("Human approval")
+
+    if not st.session_state.last_state:
+        st.warning(
+            "No case is waiting for approval."
+        )
+
+    else:
+        summary = (
+            st.session_state.last_state
+            .get("stage_results", {})
+            .get("summary", {})
+        )
+
+        st.json(summary)
+
+        decision = st.radio(
+            "Decision",
+            [
+                "approve",
+                "reject",
+                "request_information",
+            ],
+        )
+
+        rationale = st.text_area(
+            "Rationale"
+        )
+
+        approver = st.text_input(
+            "Approver identity",
+            value="approver@lab.local",
+        )
+
+        if st.button("Submit human decision"):
+
+            if not rationale.strip():
+                st.error(
+                    "A rationale is required."
+                )
+
+            else:
+                result = (
+                    st.session_state.graph.invoke(
+                        Command(
+                            resume={
+                                "decision": decision,
+                                "rationale": rationale,
+                                "approver": approver,
+                            }
+                        ),
+                        config=(
+                            st.session_state.case_config
+                        ),
+                    )
+                )
+
+                st.session_state.last_state = result
+
+                st.success(
+                    "Human decision recorded. "
+                    f"Status: {result.get('status')}"
+                )
+
+                st.json(result)
+
+with tab_submit:
+    st.subheader("Submit a claim")
+
+    with st.form("claim_form"):
+        policy_number = st.text_input(
+            "Policy number",
+            value="POL-10001",
+        )
+
+        claimant_name = st.text_input(
+            "Claimant name",
+            value="John Test Customer",
+        )
+
+        claimant_email = st.text_input(
+            "Claimant email",
+            value="claimant@lab.local",
+        )
+
+        claim_type = st.selectbox(
+            "Claim type",
+            ["Health claim", "Experimental treatment"],
+        )
+
+        claim_amount = st.number_input(
+            "Claim amount",
+            min_value=1.0,
+            value=25000.0,
+        )
+
+        description = st.text_area(
+            "Description",
+            value="Hospital treatment claim",
+        )
+
+        uploaded_files = st.file_uploader(
+            "Upload claim form, invoice and medical report",
+            accept_multiple_files=True,
+        )
+
+        submitted = st.form_submit_button(
+            "Submit and process"
+        )
+
+with tab_submit:
+    st.subheader("Submit a claim")
+
+    with st.form("claim_form"):
+        policy_number = st.text_input(
+            "Policy number",
+            value="POL-10001",
+        )
+
+        claimant_name = st.text_input(
+            "Claimant name",
+            value="John Test Customer",
+        )
+
+        claimant_email = st.text_input(
+            "Claimant email",
+            value="claimant@lab.local",
+        )
+
+        claim_type = st.selectbox(
+            "Claim type",
+            ["Health claim", "Experimental treatment"],
+        )
+
+        claim_amount = st.number_input(
+            "Claim amount",
+            min_value=1.0,
+            value=25000.0,
+        )
+
+        description = st.text_area(
+            "Description",
+            value="Hospital treatment claim",
+        )
+
+        uploaded_files = st.file_uploader(
+            "Upload claim form, invoice and medical report",
+            accept_multiple_files=True,
+        )
+
+        submitted = st.form_submit_button(
+            "Submit and process"
+        )
+
+    if submitted:
+        case_id = str(uuid.uuid4())
+        documents = []
+
+        for index, uploaded_file in enumerate(uploaded_files):
+            name = uploaded_file.name.lower()
+
+            if "claim" in name:
+                document_type = "claim_form"
+            elif "invoice" in name:
+                document_type = "invoice"
+            elif "medical" in name or "report" in name:
+                document_type = "medical_report"
+            else:
+                document_type = "unknown"
+
+            documents.append(
+                {
+                    "document_id": f"DOC-{index + 1:03d}",
+                    "file_name": uploaded_file.name,
+                    "document_type": document_type,
+                    "ocr_confidence": 0.95,
+                    "injection_detected": False,
+                }
+            )
+
+        initial_state = {
+            "case_id": case_id,
+            "claim": {
+                "policy_number": policy_number,
+                "claimant_name": claimant_name,
+                "claimant_email": claimant_email,
+                "claim_type": claim_type,
+                "claim_amount": claim_amount,
+                "description": description,
+                "covered": (
+                    claim_type != "Experimental treatment"
+                ),
+                "policy_citations": [
+                    "Policy coverage and claim documentation clauses"
+                ],
+            },
+            "documents": documents,
+            "status": "submitted",
+            "next_step": "intake",
+            "agent_hops": [],
+            "stage_results": {},
+            "errors": [],
+            "failure_count": 0,
+            "token_usage": 0,
+        }
+
+        config = {
+            "configurable": {
+                "thread_id": case_id,
+            },
+            "recursion_limit": 30,
+        }
+
+        with st.spinner("Running claim agents..."):
+            result = st.session_state.graph.invoke(
+                initial_state,
+                config=config,
+            )
+
+        st.session_state.case_config = config
+        st.session_state.last_state = result
+
+        st.success(
+            f"Claim processed. Case ID: {case_id}"
+        )
+
+
+with tab_case:
+    st.subheader("Case workspace")
+
+    if not st.session_state.last_state:
+        st.warning("Submit a claim first.")
+
+    else:
+        state = st.session_state.last_state
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Case ID",
+            state.get("case_id"),
+        )
+
+        col2.metric(
+            "Status",
+            state.get("status"),
+        )
+
+        col3.metric(
+            "Agent hops",
+            len(state.get("agent_hops", [])),
+        )
+
+        st.markdown("### Agent trajectory")
+
+        st.write(
+            " -> ".join(
+                state.get("agent_hops", [])
+            )
+        )
+
+        st.markdown("### Summary")
+
+        st.json(
+            state.get(
+                "stage_results",
+                {},
+            ).get(
+                "summary",
+                {},
+            )
+        )
+
+        st.markdown("### Routing")
+
+        st.json(
+            state.get(
+                "stage_results",
+                {},
+            ).get(
+                "routing",
+                {},
+            )
+        )
+
+        st.markdown("### Messages")
+
+        for message in state.get("messages", []):
+            st.write(f"- {message}")
+
+
+with tab_approval:
+    st.subheader("Human approval")
+
+    if not st.session_state.last_state:
+        st.warning(
+            "No case is waiting for approval."
+        )
+
+    else:
+        summary = (
+            st.session_state.last_state
+            .get("stage_results", {})
+            .get("summary", {})
+        )
+
+        st.json(summary)
+
+        decision = st.radio(
+            "Decision",
+            [
+                "approve",
+                "reject",
+                "request_information",
+            ],
+        )
+
+        rationale = st.text_area(
+            "Rationale"
+        )
+
+        approver = st.text_input(
+            "Approver identity",
+            value="approver@lab.local",
+        )
+
+        if st.button("Submit human decision"):
+
+            if not rationale.strip():
+                st.error(
+                    "A rationale is required."
+                )
+
+            else:
+                result = (
+                    st.session_state.graph.invoke(
+                        Command(
+                            resume={
+                                "decision": decision,
+                                "rationale": rationale,
+                                "approver": approver,
+                            }
+                        ),
+                        config=(
+                            st.session_state.case_config
+                        ),
+                    )
+                )
+
+                st.session_state.last_state = result
+
+                st.success(
+                    "Human decision recorded. "
+                    f"Status: {result.get('status')}"
+                )
+
+                st.json(result)

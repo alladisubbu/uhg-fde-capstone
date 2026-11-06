@@ -1,0 +1,28 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: uhg-claims-postgres
+    environment:
+      POSTGRES_DB: claims_db
+      POSTGRES_USER: claims_user
+      POSTGRES_PASSWORD: claims_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - claims_postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U claims_user -d claims_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: uhg-claims-mailpit
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  claims_postgres_data:
