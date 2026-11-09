@@ -1,272 +1,549 @@
-import operator
 import os
-from typing import Annotated, Any, Literal, TypedDict
+import re
+from typing import Any, TypedDict
 
-from dotenv import load_dotenv
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, Send, interrupt
-
-load_dotenv()
+from langgraph.types import interrupt
 
 
 class ClaimState(TypedDict, total=False):
     case_id: str
     claim: dict[str, Any]
     documents: list[dict[str, Any]]
-    document_results: Annotated[list[dict[str, Any]], operator.add]
-    messages: Annotated[list[str], operator.add]
+    document_results: list[dict[str, Any]]
+    messages: list[str]
+    warnings: list[str]
+    errors: list[str]
+    agent_hops: list[str]
+    stage_results: dict[str, Any]
     status: str
     next_step: str
-    agent_hops: Annotated[list[str], operator.add]
-    stage_results: dict[str, Any]
-    human_decision: dict[str, Any] | None
-    errors: Annotated[list[str], operator.add]
-    failure_count: int
-    token_usage: int
+    human_decision: dict[str, Any]
 
 
-ALLOWED_TRANSITIONS = {
-    "submitted": {"intake", "manual_review"},
-    "intake_complete": {"document", "manual_review"},
-    "documents_complete": {"summary", "await_documents", "manual_review"},
-    "summarised": {"routing", "manual_review"},
-    "assigned": {"sla_comms", "human_review", "manual_review"},
-    "approval_pending": {"human_review", "manual_review"},
-    "awaiting_documents": {"await_documents", "manual_review"},
-    "approved": {"finalize"},
-    "rejected": {"finalize"},
-    "information_requested": {"await_documents"},
+REQUIRED_DOCUMENTS = {
+    "claim_form",
+    "invoice",
+    "medical_report",
 }
 
 
-def guarded_goto(state: ClaimState, requested_node: str) -> str:
-    status = state.get("status", "submitted")
-    allowed = ALLOWED_TRANSITIONS.get(status, set())
+INJECTION_PATTERNS = (
+    r"ignore\s+(all\s+)?previous\s+instructions",
+    r"approve\s+this\s+claim",
+    r"reject\s+this\s+claim",
+    r"reveal\s+(the\s+)?system\s+prompt",
+    r"override\s+policy",
+)
 
-    if requested_node not in allowed:
-        return "manual_review"
 
-    return requested_node
+def normalise(value):
+    return re.sub(
+        r"\s+",
+        " ",
+        str(value or "").strip().lower(),
+    )
 
 
-def intake_node(state: ClaimState):
+def contains_injection(text):
+    lowered = text.lower()
+
+    return any(
+        re.search(pattern, lowered)
+        for pattern in INJECTION_PATTERNS
+    )
+
+
+def classify_document(file_name, text):
+    combined = f"{file_name} {text}".lower()
+
+    if (
+        "medical report" in combined
+        or "medical_report" in combined
+        or "diagnosis" in combined
+    ):
+        return "medical_report"
+
+    if (
+        "invoice" in combined
+        or "total amount" in combined
+    ):
+        return "invoice"
+
+    if (
+        "claim form" in combined
+        or "claim_form" in combined
+        or "claim number" in combined
+    ):
+        return "claim_form"
+
+    return "unknown"
+
+
+def extract_amount(text):
+    patterns = (
+        r"(?:total amount|claim amount|amount)"
+        r"\s*:\s*([0-9,]+(?:\.[0-9]{1,2})?)",
+        r"(?:total amount|claim amount|amount)"
+        r"\s*=\s*([0-9,]+(?:\.[0-9]{1,2})?)",
+    )
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            return float(
+                match.group(1).replace(",", "")
+            )
+
+    return None
+
+
+def extract_name(text):
+    pattern = (
+        r"(?:claimant name|"
+        r"patient\s*/\s*claimant name|"
+        r"patient name)"
+        r"\s*:\s*([^\n\r]+)"
+    )
+
+    match = re.search(
+        pattern,
+        text,
+        re.IGNORECASE,
+    )
+
+    if match:
+        return match.group(1).strip()
+
+    return None
+
+
+def intake_node(state):
     claim = state["claim"]
 
-    duplicate = (
-        claim.get("force_duplicate", False)
-        or claim.get("duplicate_case_id") is not None
-    )
-    coverage_issue = claim.get("covered") is False
+    errors = list(state.get("errors", []))
+    warnings = list(state.get("warnings", []))
+    messages = list(state.get("messages", []))
+    agent_hops = list(state.get("agent_hops", []))
 
-    risks = []
-    if duplicate:
-        risks.append("Possible duplicate claim")
-    if coverage_issue:
-        risks.append("Potentially outside policy coverage")
+    policy_number = claim.get("policy_number")
+    claim_amount = float(
+        claim.get("claim_amount", 0)
+    )
+    claim_type = normalise(
+        claim.get("claim_type")
+    )
+
+    if policy_number != "POL-10001":
+        errors.append(
+            "Policy number was not found in "
+            "the seeded capstone policy data."
+        )
+
+    if claim_amount <= 0:
+        errors.append(
+            "Claim amount must be greater than zero."
+        )
+
+    if claim_amount > 100000:
+        warnings.append(
+            "Claim amount exceeds the seeded "
+            "policy coverage limit of 100000."
+        )
+
+    if claim_type == "experimental treatment":
+        warnings.append(
+            "Experimental treatment requires "
+            "policy or pre-authorisation review."
+        )
+
+    agent_hops.append("intake")
+
+    if errors:
+        messages.append(
+            "Claim intake validation failed."
+        )
+
+        return {
+            **state,
+            "status": "validation_failed",
+            "next_step": "error_review",
+            "errors": errors,
+            "warnings": warnings,
+            "messages": messages,
+            "agent_hops": agent_hops,
+        }
+
+    messages.append(
+        "Claim intake validation completed."
+    )
 
     return {
+        **state,
         "status": "intake_complete",
-        "next_step": "document",
-        "agent_hops": ["intake"],
-        "messages": ["Intake checks completed"],
+        "next_step": "document_review",
+        "errors": errors,
+        "warnings": warnings,
+        "messages": messages,
+        "agent_hops": agent_hops,
         "stage_results": {
             **state.get("stage_results", {}),
             "intake": {
-                "duplicate": duplicate,
-                "coverage_issue": coverage_issue,
-                "risks": risks,
+                "valid": True,
+                "warnings": warnings,
             },
         },
     }
 
 
-def fan_out_documents(state: ClaimState):
+def route_after_intake(state):
+    if state.get("errors"):
+        return "error_review"
+
+    return "document_review"
+
+
+def document_review_node(state):
+    claim = state["claim"]
     documents = state.get("documents", [])
 
+    results = []
+    errors = list(state.get("errors", []))
+    warnings = list(state.get("warnings", []))
+    messages = list(state.get("messages", []))
+    agent_hops = list(state.get("agent_hops", []))
+
     if not documents:
-        return "no_documents"
-
-    return [
-        Send(
-            "process_document",
-            {
-                "case_id": state["case_id"],
-                "document": document,
-            },
+        errors.append(
+            "No supporting documents were uploaded."
         )
-        for document in documents
-    ]
 
+    for document in documents:
+        file_name = document.get(
+            "file_name",
+            "unnamed",
+        )
+        text = document.get("text", "")
 
-def process_document(state: dict):
-    document = state["document"]
-    confidence = float(document.get("ocr_confidence", 0.90))
-    injection = bool(document.get("injection_detected", False))
+        document_type = classify_document(
+            file_name,
+            text,
+        )
 
-    result = {
-        "document_id": document.get("document_id"),
-        "file_name": document.get("file_name"),
-        "document_type": document.get("document_type", "unknown"),
-        "ocr_confidence": confidence,
-        "injection_detected": injection,
-    }
+        confidence = float(
+            document.get(
+                "ocr_confidence",
+                0.95,
+            )
+        )
 
-    return {
-        "document_results": [result],
-        "agent_hops": ["document"],
-    }
+        injection_detected = contains_injection(
+            text
+        )
 
+        extracted_amount = extract_amount(text)
+        extracted_name = extract_name(text)
 
-def join_documents(state: ClaimState):
-    results = state.get("document_results", [])
-    threshold = float(os.getenv("OCR_CONFIDENCE_THRESHOLD", "0.75"))
+        if document_type == "unknown":
+            warnings.append(
+                f"Could not classify {file_name}."
+            )
 
-    low_confidence = any(
-        float(item.get("ocr_confidence", 0)) < threshold
-        for item in results
-    )
-    injection_detected = any(
-        item.get("injection_detected", False)
-        for item in results
-    )
+        threshold = float(
+            os.getenv(
+                "OCR_CONFIDENCE_THRESHOLD",
+                "0.75",
+            )
+        )
+
+        if confidence < threshold:
+            errors.append(
+                f"Low OCR confidence for "
+                f"{file_name}: {confidence:.2f}."
+            )
+
+        if injection_detected:
+            errors.append(
+                "Potential prompt injection detected "
+                f"in {file_name}. Embedded instructions "
+                "were ignored."
+            )
+
+        if extracted_name:
+            if normalise(extracted_name) != normalise(
+                claim.get("claimant_name")
+            ):
+                errors.append(
+                    "Claimant name mismatch "
+                    f"in {file_name}."
+                )
+
+        if (
+            extracted_amount is not None
+            and document_type
+            in {"claim_form", "invoice"}
+        ):
+            entered_amount = float(
+                claim.get("claim_amount", 0)
+            )
+
+            if abs(
+                extracted_amount - entered_amount
+            ) > 1:
+                errors.append(
+                    "Claim amount mismatch "
+                    f"in {file_name}. "
+                    f"Extracted amount: "
+                    f"{extracted_amount:.2f}."
+                )
+
+        results.append(
+            {
+                "file_name": file_name,
+                "document_type": document_type,
+                "ocr_confidence": confidence,
+                "injection_detected":
+                    injection_detected,
+                "extracted_amount":
+                    extracted_amount,
+                "extracted_name":
+                    extracted_name,
+            }
+        )
 
     available_types = {
-        item.get("document_type")
+        item["document_type"]
         for item in results
     }
-    required_types = {"claim_form", "invoice", "medical_report"}
-    missing_documents = sorted(required_types - available_types)
 
-    if low_confidence:
-        return {
-            "status": "documents_complete",
-            "next_step": "manual_review",
-            "messages": ["Low OCR confidence detected"],
-            "stage_results": {
-                **state.get("stage_results", {}),
-                "documents": {
-                    "low_confidence": True,
-                    "injection_detected": injection_detected,
-                    "missing_documents": missing_documents,
-                },
-            },
-        }
+    missing_documents = sorted(
+        REQUIRED_DOCUMENTS - available_types
+    )
 
     if missing_documents:
+        errors.append(
+            "Missing required documents: "
+            + ", ".join(missing_documents)
+            + "."
+        )
+
+    agent_hops.append("document")
+
+    if errors:
+        serious_error = any(
+            (
+                "ocr" in item.lower()
+                or "injection" in item.lower()
+                or "mismatch" in item.lower()
+            )
+            for item in errors
+        )
+
+        if serious_error:
+            status = "manual_review"
+            next_step = "manual_review"
+        else:
+            status = "awaiting_documents"
+            next_step = "await_documents"
+
+        messages.append(
+            "Document validation found issues "
+            "requiring attention."
+        )
+
         return {
-            "status": "documents_complete",
-            "next_step": "await_documents",
-            "messages": [
-                "Missing documents: " + ", ".join(missing_documents)
-            ],
+            **state,
+            "status": status,
+            "next_step": next_step,
+            "document_results": results,
+            "errors": errors,
+            "warnings": warnings,
+            "messages": messages,
+            "agent_hops": agent_hops,
             "stage_results": {
-                **state.get("stage_results", {}),
+                **state.get(
+                    "stage_results",
+                    {},
+                ),
                 "documents": {
-                    "low_confidence": False,
-                    "injection_detected": injection_detected,
-                    "missing_documents": missing_documents,
+                    "valid": False,
+                    "missing_documents":
+                        missing_documents,
+                    "results": results,
                 },
             },
         }
 
+    messages.append(
+        "All required documents passed validation."
+    )
+
     return {
+        **state,
         "status": "documents_complete",
         "next_step": "summary",
-        "messages": ["Document processing completed"],
+        "document_results": results,
+        "errors": [],
+        "warnings": warnings,
+        "messages": messages,
+        "agent_hops": agent_hops,
         "stage_results": {
             **state.get("stage_results", {}),
             "documents": {
-                "low_confidence": False,
-                "injection_detected": injection_detected,
+                "valid": True,
                 "missing_documents": [],
+                "results": results,
             },
         },
     }
 
 
-def no_documents_node(state: ClaimState):
-    return {
-        "status": "documents_complete",
-        "next_step": "await_documents",
-        "messages": ["No documents were supplied"],
-    }
+def route_after_documents(state):
+    return state.get(
+        "next_step",
+        "manual_review",
+    )
 
 
-def summary_node(state: ClaimState):
-    document_stage = state.get("stage_results", {}).get("documents", {})
-    intake_stage = state.get("stage_results", {}).get("intake", {})
+def summary_node(state):
+    claim = state["claim"]
 
-    risks = list(intake_stage.get("risks", []))
+    agent_hops = list(
+        state.get("agent_hops", [])
+    )
+    messages = list(
+        state.get("messages", [])
+    )
 
-    if document_stage.get("injection_detected"):
-        risks.append(
-            "Prompt-injection instruction detected and ignored"
+    agent_hops.append("summary")
+    messages.append(
+        "Grounded case summary created."
+    )
+
+    document_names = [
+        item.get("file_name")
+        for item
+        in state.get(
+            "document_results",
+            [],
         )
+    ]
 
     summary = {
         "facts": [
-            f"Case ID: {state['case_id']}",
-            f"Claim amount: {state['claim'].get('claim_amount')}",
-            f"Claim type: {state['claim'].get('claim_type')}",
+            "Policy: "
+            + str(
+                claim.get("policy_number")
+            ),
+            "Claimant: "
+            + str(
+                claim.get("claimant_name")
+            ),
+            "Claim type: "
+            + str(
+                claim.get("claim_type")
+            ),
+            "Claim amount: "
+            + f"{float(claim.get('claim_amount', 0)):.2f}",
         ],
-        "evidence": [
-            item.get("file_name", "document")
-            for item in state.get("document_results", [])
+        "evidence": document_names,
+        "missing_information": [],
+        "risks": state.get("warnings", []),
+        "policy_citations": [
+            "POL-10001 coverage and "
+            "documentation rules"
         ],
-        "missing_information": document_stage.get(
-            "missing_documents",
-            [],
+        "next_action": (
+            "Route to a qualified approver "
+            "for human review."
         ),
-        "risks": risks,
-        "policy_citations": state["claim"].get(
-            "policy_citations",
-            ["Policy coverage and limits clause"],
-        ),
-        "next_action": "Route to a qualified adjuster and approver",
     }
 
     return {
+        **state,
         "status": "summarised",
         "next_step": "routing",
-        "agent_hops": ["summary"],
+        "messages": messages,
+        "agent_hops": agent_hops,
         "stage_results": {
             **state.get("stage_results", {}),
             "summary": summary,
         },
-        "messages": ["Grounded case summary prepared"],
     }
 
 
-def routing_node(state: ClaimState):
-    amount = float(state["claim"].get("claim_amount", 0))
+def routing_node(state):
+    amount = float(
+        state["claim"].get(
+            "claim_amount",
+            0,
+        )
+    )
 
     if amount <= 50000:
         approver = "approver@lab.local"
     else:
-        approver = "senior.approver@lab.local"
+        approver = (
+            "senior.approver@lab.local"
+        )
+
+    agent_hops = list(
+        state.get("agent_hops", [])
+    )
+    messages = list(
+        state.get("messages", [])
+    )
+
+    agent_hops.append("routing")
+    messages.append(
+        f"Claim routed to {approver}."
+    )
+
+    routing = {
+        "adjuster": "adjuster@lab.local",
+        "approver": approver,
+        "approval_limit_checked": True,
+    }
 
     return {
+        **state,
         "status": "assigned",
         "next_step": "sla_comms",
-        "agent_hops": ["routing"],
+        "messages": messages,
+        "agent_hops": agent_hops,
         "stage_results": {
             **state.get("stage_results", {}),
-            "routing": {
-                "adjuster": "adjuster@lab.local",
-                "approver": approver,
-                "approval_limit_checked": True,
-            },
+            "routing": routing,
         },
-        "messages": [f"Case assigned to {approver} for approval"],
     }
 
 
-def sla_comms_node(state: ClaimState):
+def sla_comms_node(state):
+    agent_hops = list(
+        state.get("agent_hops", [])
+    )
+    messages = list(
+        state.get("messages", [])
+    )
+
+    agent_hops.append("sla_comms")
+    messages.append(
+        "Claim is ready for "
+        "authorized human review."
+    )
+
     return {
+        **state,
         "status": "approval_pending",
         "next_step": "human_review",
-        "agent_hops": ["sla_comms"],
+        "messages": messages,
+        "agent_hops": agent_hops,
         "stage_results": {
             **state.get("stage_results", {}),
             "sla_comms": {
@@ -274,17 +551,24 @@ def sla_comms_node(state: ClaimState):
                 "notification_required": True,
             },
         },
-        "messages": ["Approval SLA scheduled"],
     }
 
 
-def human_review_node(state: ClaimState):
+def human_review_node(state):
     decision = interrupt(
         {
             "type": "claim_approval",
             "case_id": state["case_id"],
-            "summary": state.get("stage_results", {}).get("summary", {}),
-            "routing": state.get("stage_results", {}).get("routing", {}),
+            "summary": (
+                state
+                .get("stage_results", {})
+                .get("summary", {})
+            ),
+            "routing": (
+                state
+                .get("stage_results", {})
+                .get("routing", {})
+            ),
             "allowed_decisions": [
                 "approve",
                 "reject",
@@ -294,211 +578,190 @@ def human_review_node(state: ClaimState):
     )
 
     decision_name = decision.get("decision")
-    rationale = decision.get("rationale")
-    approver = decision.get("approver")
 
-    if decision_name not in {
+    valid_decisions = {
         "approve",
         "reject",
         "request_information",
-    }:
+    }
+
+    if decision_name not in valid_decisions:
         return {
+            **state,
             "status": "approval_pending",
-            "errors": ["Invalid human decision"],
+            "errors": [
+                "Invalid human decision."
+            ],
         }
 
     status_map = {
         "approve": "approved",
         "reject": "rejected",
-        "request_information": "information_requested",
+        "request_information":
+            "information_requested",
     }
 
-    return {
-        "status": status_map[decision_name],
-        "next_step": (
-            "await_documents"
-            if decision_name == "request_information"
-            else "finalize"
-        ),
-        "human_decision": {
-            "decision": decision_name,
-            "rationale": rationale,
-            "approver": approver,
-        },
-        "messages": [
-            f"Human decision recorded: {decision_name}"
-        ],
-    }
-
-
-def await_documents_node(state: ClaimState):
-    response = interrupt(
-        {
-            "type": "await_documents",
-            "case_id": state["case_id"],
-            "missing_documents": state.get(
-                "stage_results",
-                {},
-            ).get("documents", {}).get("missing_documents", []),
-            "message": "Upload the requested documents before resuming.",
-        }
+    messages = list(
+        state.get("messages", [])
     )
 
-    if not response.get("documents_received"):
-        return {
-            "status": "awaiting_documents",
-            "next_step": "await_documents",
-            "messages": ["Still waiting for documents"],
-        }
+    messages.append(
+        "Human decision recorded: "
+        + decision_name
+        + "."
+    )
 
     return {
-        "status": "intake_complete",
-        "next_step": "document",
-        "documents": response.get(
-            "documents",
-            state.get("documents", []),
-        ),
-        "messages": ["Requested documents received"],
-    }
-
-
-def manual_review_node(state: ClaimState):
-    return {
-        "status": "manual_review",
+        **state,
+        "status": status_map[decision_name],
         "next_step": "end",
-        "messages": ["Case moved to manual review"],
-        "agent_hops": ["manual_review"],
+        "human_decision": decision,
+        "messages": messages,
     }
 
 
-def finalize_node(state: ClaimState):
+def issue_review_node(state):
+    agent_hops = list(
+        state.get("agent_hops", [])
+    )
+    messages = list(
+        state.get("messages", [])
+    )
+
+    agent_hops.append(
+        state.get(
+            "next_step",
+            "error_review",
+        )
+    )
+
+    messages.append(
+        "Claim stopped before approval "
+        "because validation issues "
+        "must be corrected."
+    )
+
     return {
-        "status": state["status"],
-        "next_step": "end",
-        "messages": ["Claim workflow finalised after human decision"],
-        "agent_hops": ["finalize"],
+        **state,
+        "messages": messages,
+        "agent_hops": agent_hops,
     }
-
-
-def route_after_intake(state: ClaimState):
-    return guarded_goto(state, state.get("next_step", "manual_review"))
-
-
-def route_after_documents(state: ClaimState):
-    requested = state.get("next_step", "manual_review")
-    return guarded_goto(state, requested)
-
-
-def route_after_summary(state: ClaimState):
-    return guarded_goto(state, state.get("next_step", "manual_review"))
-
-
-def route_after_routing(state: ClaimState):
-    return guarded_goto(state, state.get("next_step", "manual_review"))
-
-
-def route_after_sla(state: ClaimState):
-    return guarded_goto(state, state.get("next_step", "manual_review"))
-
-
-def route_after_human(state: ClaimState):
-    if state["status"] == "information_requested":
-        return "await_documents"
-    return "finalize"
 
 
 def build_graph(checkpointer=None):
     builder = StateGraph(ClaimState)
 
-    builder.add_node("intake", intake_node)
-    builder.add_node("process_document", process_document)
-    builder.add_node("join_documents", join_documents)
-    builder.add_node("no_documents", no_documents_node)
-    builder.add_node("summary", summary_node)
-    builder.add_node("routing", routing_node)
-    builder.add_node("sla_comms", sla_comms_node)
-    builder.add_node("human_review", human_review_node)
-    builder.add_node("await_documents", await_documents_node)
-    builder.add_node("manual_review", manual_review_node)
-    builder.add_node("finalize", finalize_node)
+    builder.add_node(
+        "intake",
+        intake_node,
+    )
 
-    builder.add_edge(START, "intake")
+    builder.add_node(
+        "document_review",
+        document_review_node,
+    )
+
+    builder.add_node(
+        "summary",
+        summary_node,
+    )
+
+    builder.add_node(
+        "routing",
+        routing_node,
+    )
+
+    builder.add_node(
+        "sla_comms",
+        sla_comms_node,
+    )
+
+    builder.add_node(
+        "human_review",
+        human_review_node,
+    )
+
+    builder.add_node(
+        "manual_review",
+        issue_review_node,
+    )
+
+    builder.add_node(
+        "await_documents",
+        issue_review_node,
+    )
+
+    builder.add_node(
+        "error_review",
+        issue_review_node,
+    )
+
+    builder.add_edge(
+        START,
+        "intake",
+    )
 
     builder.add_conditional_edges(
         "intake",
         route_after_intake,
         {
-            "document": "process_document_fanout",
-            "manual_review": "manual_review",
+            "document_review":
+                "document_review",
+            "error_review":
+                "error_review",
         },
     )
 
-    builder.add_node(
-        "process_document_fanout",
-        lambda state: {},
-    )
-
     builder.add_conditional_edges(
-        "process_document_fanout",
-        fan_out_documents,
-        {
-            "process_document": "process_document",
-            "no_documents": "no_documents",
-        },
-    )
-
-    builder.add_edge("process_document", "join_documents")
-    builder.add_edge("no_documents", "await_documents")
-
-    builder.add_conditional_edges(
-        "join_documents",
+        "document_review",
         route_after_documents,
         {
             "summary": "summary",
-            "await_documents": "await_documents",
-            "manual_review": "manual_review",
+            "manual_review":
+                "manual_review",
+            "await_documents":
+                "await_documents",
         },
     )
 
-    builder.add_conditional_edges(
+    builder.add_edge(
         "summary",
-        route_after_summary,
-        {
-            "routing": "routing",
-            "manual_review": "manual_review",
-        },
-    )
-
-    builder.add_conditional_edges(
         "routing",
-        route_after_routing,
-        {
-            "sla_comms": "sla_comms",
-            "manual_review": "manual_review",
-        },
     )
 
-    builder.add_conditional_edges(
+    builder.add_edge(
+        "routing",
         "sla_comms",
-        route_after_sla,
-        {
-            "human_review": "human_review",
-            "manual_review": "manual_review",
-        },
     )
 
-    builder.add_conditional_edges(
+    builder.add_edge(
+        "sla_comms",
         "human_review",
-        route_after_human,
-        {
-            "finalize": "finalize",
-            "await_documents": "await_documents",
-        },
     )
 
-    builder.add_edge("manual_review", END)
-    builder.add_edge("finalize", END)
+    builder.add_edge(
+        "manual_review",
+        END,
+    )
+
+    builder.add_edge(
+        "await_documents",
+        END,
+    )
+
+    builder.add_edge(
+        "error_review",
+        END,
+    )
+
+    builder.add_edge(
+        "human_review",
+        END,
+    )
 
     return builder.compile(
-        checkpointer=checkpointer or InMemorySaver()
+        checkpointer=(
+            checkpointer
+            or InMemorySaver()
+        )
     )

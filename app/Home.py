@@ -4,10 +4,6 @@ import streamlit as st
 from langgraph.types import Command
 
 from graph.claims_graph import build_graph
-from services.document_validation import (
-    analyze_uploaded_files,
-    save_uploaded_files,
-)
 
 
 st.set_page_config(
@@ -15,12 +11,15 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("UHG Intelligent Claims Processing")
+st.title(
+    "UHG Intelligent Claims Processing"
+)
 
 st.caption(
-    "AI prepares the claim. "
-    "An authorised person makes the decision."
+    "Agents prepare evidence and recommendations. "
+    "Authorized people make claim decisions."
 )
+
 
 if "graph" not in st.session_state:
     st.session_state.graph = build_graph()
@@ -31,28 +30,25 @@ if "case_config" not in st.session_state:
 if "last_state" not in st.session_state:
     st.session_state.last_state = None
 
-if "validation_report" not in st.session_state:
-    st.session_state.validation_report = None
 
-
-tab_submit, tab_case, tab_approval = st.tabs(
-    [
-        "Submit Claim",
-        "Case Workspace",
-        "Human Approval",
-    ]
+submit_tab, workspace_tab, approval_tab = (
+    st.tabs(
+        [
+            "Submit Claim",
+            "Case Workspace",
+            "Human Approval",
+        ]
+    )
 )
 
 
-with tab_submit:
+with submit_tab:
     st.subheader("Submit a claim")
 
-    st.info(
-        "For the positive test, upload a claim form, "
-        "invoice and medical report together."
-    )
-
-    with st.form("claim_form"):
+    with st.form(
+        "claim_form",
+        clear_on_submit=False,
+    ):
         policy_number = st.text_input(
             "Policy number",
             value="POL-10001",
@@ -86,349 +82,285 @@ with tab_submit:
             "Description",
             value=(
                 "Hospital treatment claim "
-                "for covered services."
+                "for covered inpatient services."
             ),
         )
 
         uploaded_files = st.file_uploader(
-            "Upload claim documents",
-            type=["txt", "md", "csv"],
+            (
+                "Upload claim form, invoice "
+                "and medical report"
+            ),
+            type=["txt", "pdf", "docx"],
             accept_multiple_files=True,
         )
 
         submitted = st.form_submit_button(
-            "Validate and process claim"
+            "Review and process claim",
+            type="primary",
         )
 
-
     if submitted:
-        if not uploaded_files:
+        case_id = str(uuid.uuid4())
+        documents = []
+
+        for index, uploaded_file in enumerate(
+            uploaded_files or []
+        ):
+            raw_data = uploaded_file.getvalue()
+
+            try:
+                text = raw_data.decode(
+                    "utf-8",
+                    errors="ignore",
+                )
+            except Exception:
+                text = ""
+
+            if text.strip():
+                confidence = 0.95
+            else:
+                confidence = 0.30
+
+            documents.append(
+                {
+                    "document_id":
+                        f"DOC-{index + 1:03d}",
+                    "file_name":
+                        uploaded_file.name,
+                    "text": text,
+                    "ocr_confidence":
+                        confidence,
+                }
+            )
+
+        initial_state = {
+            "case_id": case_id,
+            "claim": {
+                "policy_number":
+                    policy_number.strip(),
+                "claimant_name":
+                    claimant_name.strip(),
+                "claimant_email":
+                    claimant_email.strip(),
+                "claim_type":
+                    claim_type,
+                "claim_amount":
+                    float(claim_amount),
+                "description":
+                    description.strip(),
+            },
+            "documents": documents,
+            "document_results": [],
+            "messages": [],
+            "warnings": [],
+            "errors": [],
+            "agent_hops": [],
+            "stage_results": {},
+            "status": "submitted",
+            "next_step": "intake",
+        }
+
+        config = {
+            "configurable": {
+                "thread_id": case_id,
+            },
+            "recursion_limit": 30,
+        }
+
+        with st.spinner(
+            "Validating claim and "
+            "supporting documents..."
+        ):
+            result = (
+                st.session_state.graph.invoke(
+                    initial_state,
+                    config=config,
+                )
+            )
+
+        st.session_state.case_config = config
+        st.session_state.last_state = result
+
+        errors = result.get("errors", [])
+        warnings = result.get("warnings", [])
+        current_status = result.get("status")
+
+        if errors:
             st.error(
-                "Upload at least one claim document."
+                "Claim processing stopped because "
+                "validation issues were found."
+            )
+
+            for error in errors:
+                st.error(error)
+
+        elif (
+            current_status == "approval_pending"
+            or result.get("__interrupt__")
+        ):
+            st.success(
+                "Genuine claim successfully reviewed "
+                "and prepared for human approval."
+            )
+
+            for warning in warnings:
+                st.warning(warning)
+
+            st.info(
+                "Open the Human Approval tab "
+                "to make the authorized decision."
             )
 
         else:
-            case_id = str(uuid.uuid4())
-
-            saved_paths = save_uploaded_files(
-                uploaded_files,
-                case_id,
-            )
-
-            report = analyze_uploaded_files(
-                uploaded_files=uploaded_files,
-                submitted_claimant=claimant_name,
-                submitted_amount=claim_amount,
-            )
-
-            covered = (
-                claim_type
-                != "Experimental treatment"
-                and claim_amount <= 100000
-            )
-
-            coverage_risks = []
-
-            if claim_type == "Experimental treatment":
-                coverage_risks.append(
-                    "Experimental treatment requires "
-                    "policy or pre-authorisation review."
-                )
-
-            if claim_amount > 100000:
-                coverage_risks.append(
-                    "Claim exceeds the seeded "
-                    "POL-10001 coverage limit."
-                )
-
-            report["risks"].extend(
-                coverage_risks
-            )
-
-            initial_state = {
-                "case_id": case_id,
-                "claim": {
-                    "policy_number": policy_number,
-                    "claimant_name": claimant_name,
-                    "claimant_email": claimant_email,
-                    "claim_type": claim_type,
-                    "claim_amount": claim_amount,
-                    "description": description,
-                    "covered": covered,
-                    "policy_citations": [
-                        "POL-10001 coverage, "
-                        "documentation and limit clauses"
-                    ],
-                },
-                "documents": report["documents"],
-                "status": "submitted",
-                "next_step": "intake",
-                "agent_hops": [],
-                "stage_results": {},
-                "errors": [],
-                "failure_count": 0,
-                "token_usage": 0,
-            }
-
-            config = {
-                "configurable": {
-                    "thread_id": case_id,
-                },
-                "recursion_limit": 30,
-            }
-
-            with st.spinner(
-                "Validating documents and "
-                "running claim workflow..."
-            ):
-                result = (
-                    st.session_state.graph.invoke(
-                        initial_state,
-                        config=config,
-                    )
-                )
-
-            st.session_state.case_config = config
-            st.session_state.last_state = result
-            st.session_state.validation_report = report
-
-
-            status = result.get(
-                "status",
-                "unknown",
-            )
-
-            st.markdown("### Validation result")
-
-            if report["injection_detected"]:
-                st.error(
-                    "Security warning: Potential prompt "
-                    "injection detected. Embedded "
-                    "instructions were ignored."
-                )
-
-            if report["low_confidence"]:
-                st.error(
-                    "Document-quality warning: OCR "
-                    "confidence is below 0.75. "
-                    "Manual review is required."
-                )
-
-            if report["missing_documents"]:
-                st.warning(
-                    "Missing required documents: "
-                    + ", ".join(
-                        report["missing_documents"]
-                    )
-                )
-
-            if report["risks"]:
-                st.markdown("#### Risks identified")
-
-                for risk in report["risks"]:
-                    st.write(f"- {risk}")
-
-            if status == "manual_review":
-                st.error(
-                    "Claim requires manual review. "
-                    "No automated claim decision was made."
-                )
-
-            elif status in {
-                "awaiting_documents",
-                "documents_complete",
-            } and report["missing_documents"]:
-                st.warning(
-                    "Additional documents are required "
-                    "before processing can continue."
-                )
-
-            elif status in {
-                "approval_pending",
-                "assigned",
-            }:
-                st.success(
-                    "Claim preparation completed. "
-                    "The case is ready for human review."
-                )
-
-            else:
-                st.info(
-                    f"Current workflow status: {status}"
-                )
-
-            st.caption(
-                f"Case ID: {case_id}"
-            )
-
-            st.caption(
-                "Saved files: "
-                + ", ".join(saved_paths)
+            st.info(
+                "Claim processed with status: "
+                + str(current_status)
             )
 
 
-with tab_case:
+with workspace_tab:
     st.subheader("Case workspace")
 
-    if not st.session_state.last_state:
-        st.warning("Submit a claim first.")
+    state = st.session_state.last_state
 
-    else:
-        state = st.session_state.last_state
-        report = (
-            st.session_state.validation_report
-            or {}
+    if not state:
+        st.info(
+            "Submit a claim to view "
+            "the workspace."
         )
 
+    else:
         col1, col2, col3 = st.columns(3)
 
         col1.metric(
             "Case ID",
-            state.get("case_id"),
+            state.get("case_id", ""),
         )
 
         col2.metric(
             "Status",
-            state.get("status"),
+            state.get("status", ""),
         )
 
         col3.metric(
             "Agent hops",
-            len(state.get("agent_hops", [])),
+            len(
+                state.get(
+                    "agent_hops",
+                    [],
+                )
+            ),
         )
 
-        st.markdown("### Agent trajectory")
+        if state.get("errors"):
+            st.error("Validation issues")
 
-        trajectory = state.get(
-            "agent_hops",
-            [],
+            for error in state.get(
+                "errors",
+                [],
+            ):
+                st.write(f"- {error}")
+
+        if state.get("warnings"):
+            st.warning("Review observations")
+
+            for warning in state.get(
+                "warnings",
+                [],
+            ):
+                st.write(f"- {warning}")
+
+        st.markdown(
+            "### Agent trajectory"
         )
 
         st.write(
-            " -> ".join(trajectory)
-            if trajectory
-            else "No trajectory available"
+            " -> ".join(
+                state.get(
+                    "agent_hops",
+                    [],
+                )
+            )
         )
 
-        st.markdown("### Document validation")
+        st.markdown(
+            "### Document validation"
+        )
 
-        for document in report.get(
-            "documents",
-            [],
-        ):
-            with st.expander(
-                document["file_name"]
-            ):
-                st.write(
-                    "Type:",
-                    document["document_type"],
-                )
-
-                st.write(
-                    "OCR confidence:",
-                    document["ocr_confidence"],
-                )
-
-                st.write(
-                    "Injection detected:",
-                    document[
-                        "injection_detected"
-                    ],
-                )
-
-                st.write(
-                    "Extracted claimant:",
-                    document[
-                        "extracted_claimant_name"
-                    ],
-                )
-
-                st.write(
-                    "Extracted amount:",
-                    document[
-                        "extracted_amount"
-                    ],
-                )
-
-                st.write(
-                    "Policy number:",
-                    document[
-                        "extracted_policy_number"
-                    ],
-                )
-
-        st.markdown("### Risks")
-
-        risks = report.get("risks", [])
-
-        if risks:
-            for risk in risks:
-                st.error(risk)
-        else:
-            st.success(
-                "No document-validation risks detected."
-            )
+        st.json(
+            state
+            .get("stage_results", {})
+            .get("documents", {})
+        )
 
         st.markdown("### Summary")
 
         st.json(
-            state.get(
-                "stage_results",
-                {},
-            ).get(
-                "summary",
-                {},
-            )
+            state
+            .get("stage_results", {})
+            .get("summary", {})
         )
 
         st.markdown("### Routing")
 
         st.json(
-            state.get(
-                "stage_results",
-                {},
-            ).get(
-                "routing",
-                {},
-            )
+            state
+            .get("stage_results", {})
+            .get("routing", {})
         )
 
+        st.markdown("### Messages")
 
-with tab_approval:
+        for message in state.get(
+            "messages",
+            [],
+        ):
+            st.write(f"- {message}")
+
+
+with approval_tab:
     st.subheader("Human approval")
 
-    if not st.session_state.last_state:
-        st.warning(
-            "No case is available for review."
+    state = st.session_state.last_state
+
+    if not state:
+        st.info(
+            "No claim has been submitted."
         )
 
-    elif st.session_state.last_state.get(
-        "status"
-    ) == "manual_review":
+    elif state.get("errors"):
         st.error(
-            "This case is in manual review because "
-            "validation or security risks were found."
+            "This claim is not eligible for "
+            "approval until validation issues "
+            "are corrected."
         )
 
-    elif st.session_state.validation_report.get(
-        "missing_documents"
+    elif not (
+        state.get("status")
+        == "approval_pending"
+        or state.get("__interrupt__")
     ):
         st.warning(
-            "The case cannot proceed to approval "
-            "until all required documents are supplied."
+            "Claim is not waiting for approval. "
+            "Current status: "
+            + str(state.get("status"))
         )
 
     else:
-        summary = (
-            st.session_state.last_state
+        st.success(
+            "Claim validation completed. "
+            "Authorized human decision is required."
+        )
+
+        st.json(
+            state
             .get("stage_results", {})
             .get("summary", {})
         )
 
-        st.json(summary)
-
         decision = st.radio(
-            "Human decision",
+            "Decision",
             [
                 "approve",
                 "reject",
@@ -437,7 +369,7 @@ with tab_approval:
         )
 
         rationale = st.text_area(
-            "Decision rationale"
+            "Rationale"
         )
 
         approver = st.text_input(
@@ -446,7 +378,8 @@ with tab_approval:
         )
 
         if st.button(
-            "Submit human decision"
+            "Submit human decision",
+            type="primary",
         ):
             if not rationale.strip():
                 st.error(
@@ -455,12 +388,17 @@ with tab_approval:
 
             else:
                 result = (
-                    st.session_state.graph.invoke(
+                    st.session_state
+                    .graph
+                    .invoke(
                         Command(
                             resume={
-                                "decision": decision,
-                                "rationale": rationale,
-                                "approver": approver,
+                                "decision":
+                                    decision,
+                                "rationale":
+                                    rationale.strip(),
+                                "approver":
+                                    approver.strip(),
                             }
                         ),
                         config=(
@@ -476,8 +414,10 @@ with tab_approval:
 
                 st.success(
                     "Human decision recorded. "
-                    f"Status: "
-                    f"{result.get('status')}"
+                    "Final status: "
+                    + str(
+                        result.get("status")
+                    )
                 )
 
-                st.json(result)
+                st.rerun()
