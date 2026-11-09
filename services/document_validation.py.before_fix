@@ -1,0 +1,300 @@
+import re
+from pathlib import Path
+from typing import Any
+
+
+REQUIRED_DOCUMENT_TYPES = {
+    "claim_form",
+    "invoice",
+    "medical_report",
+}
+
+INJECTION_PATTERNS = [
+    r"ignore\s+(all\s+)?previous\s+instructions",
+    r"ignore\s+the\s+system\s+prompt",
+    r"reveal\s+(the\s+)?system\s+prompt",
+    r"approve\s+this\s+claim",
+    r"reject\s+this\s+claim",
+    r"override\s+policy",
+    r"do\s+not\s+follow\s+the\s+rules",
+]
+
+
+def read_uploaded_text(uploaded_file) -> str:
+    file_bytes = uploaded_file.getvalue()
+
+    try:
+        return file_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return file_bytes.decode(
+            "latin-1",
+            errors="ignore",
+        )
+
+
+def classify_document(
+    file_name: str,
+    text: str,
+) -> str:
+    name = file_name.lower()
+    lowered = text.lower()
+
+    if "invoice" in name:
+        return "invoice"
+
+    if "medical" in name or "report" in name:
+        return "medical_report"
+
+    if "claim" in name or "claim form" in lowered:
+        return "claim_form"
+
+    if "invoice" in lowered and "total amount" in lowered:
+        return "invoice"
+
+    if "medical report" in lowered or "diagnosis" in lowered:
+        return "medical_report"
+
+    if "passport" in lowered or "identity" in lowered:
+        return "identity"
+
+    return "unknown"
+
+
+def detect_prompt_injection(text: str) -> bool:
+    lowered = text.lower()
+
+    return any(
+        re.search(pattern, lowered)
+        for pattern in INJECTION_PATTERNS
+    )
+
+
+def extract_ocr_confidence(text: str) -> float:
+    patterns = [
+        r"ocr\s+confidence(?:\s+to\s+simulate)?\s*?:\.\d+?)",
+        r"confidence\s*?:\.\d+?)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            return float(match.group(1))
+
+    return 0.99 if text.strip() else 0.20
+
+
+def extract_policy_number(text: str):
+    match = re.search(
+        r"\bPOL-[A-Z0-9-]+\b",
+        text,
+        re.IGNORECASE,
+    )
+
+    return match.group(0).upper() if match else None
+
+
+def extract_claimant_name(text: str):
+    patterns = [
+        r"claimant\s+name\s*:\s*([^\n\r]+)",
+        r"patient\s+name\s*:\s*([^\n\r]+)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).strip()
+
+    return None
+
+
+def extract_amount(text: str):
+    patterns = [
+        r"invoice\s+total\s+amount\s*:\s*[$₹]?\s*([0-9,]+(?:\.\d+)?)",
+        r"claim\s+amount\s*:\s*[$₹]?\s*([0-9,]+(?:\.\d+)?)",
+        r"total\s+amount\s*:\s*[$₹]?\s*([0-9,]+(?:\.\d+)?)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.IGNORECASE,
+        )
+
+        if match:
+            return float(
+                match.group(1).replace(",", "")
+            )
+
+    return None
+
+
+def normalize_name(value: str | None) -> str:
+    if not value:
+        return ""
+
+    return " ".join(
+        value.lower().strip().split()
+    )
+
+
+def analyze_text_document(
+    file_name: str,
+    text: str,
+    submitted_claimant: str,
+    submitted_amount: float,
+) -> dict[str, Any]:
+    document_type = classify_document(
+        file_name,
+        text,
+    )
+
+    confidence = extract_ocr_confidence(text)
+    injection = detect_prompt_injection(text)
+    extracted_name = extract_claimant_name(text)
+    extracted_amount = extract_amount(text)
+    policy_number = extract_policy_number(text)
+
+    risks = []
+
+    if confidence < 0.75:
+        risks.append(
+            f"Low OCR confidence for {file_name}: "
+            f"{confidence:.2f}"
+        )
+
+    if injection:
+        risks.append(
+            f"Potential prompt injection detected "
+            f"in {file_name}"
+        )
+
+    if extracted_name:
+        if normalize_name(extracted_name) != normalize_name(
+            submitted_claimant
+        ):
+            risks.append(
+                f"Claimant name mismatch in {file_name}: "
+                f"document has '{extracted_name}'"
+            )
+
+    if extracted_amount is not None:
+        if abs(
+            extracted_amount - float(submitted_amount)
+        ) > 1:
+            risks.append(
+                f"Claim amount mismatch in {file_name}: "
+                f"document has {extracted_amount:.2f}, "
+                f"submitted claim has "
+                f"{float(submitted_amount):.2f}"
+            )
+
+    return {
+        "file_name": file_name,
+        "document_type": document_type,
+        "ocr_confidence": confidence,
+        "injection_detected": injection,
+        "extracted_claimant_name": extracted_name,
+        "extracted_amount": extracted_amount,
+        "extracted_policy_number": policy_number,
+        "risks": risks,
+    }
+
+
+def analyze_uploaded_files(
+    uploaded_files,
+    submitted_claimant: str,
+    submitted_amount: float,
+) -> dict[str, Any]:
+    documents = []
+    all_risks = []
+
+    for index, uploaded_file in enumerate(
+        uploaded_files
+    ):
+        text = read_uploaded_text(uploaded_file)
+
+        document = analyze_text_document(
+            file_name=uploaded_file.name,
+            text=text,
+            submitted_claimant=submitted_claimant,
+            submitted_amount=submitted_amount,
+        )
+
+        document["document_id"] = (
+            f"DOC-{index + 1:03d}"
+        )
+
+        document["text_preview"] = text[:300]
+        documents.append(document)
+        all_risks.extend(document["risks"])
+
+    available_types = {
+        document["document_type"]
+        for document in documents
+    }
+
+    missing_documents = sorted(
+        REQUIRED_DOCUMENT_TYPES - available_types
+    )
+
+    if missing_documents:
+        all_risks.append(
+            "Missing required documents: "
+            + ", ".join(missing_documents)
+        )
+
+    low_confidence = any(
+        document["ocr_confidence"] < 0.75
+        for document in documents
+    )
+
+    injection_detected = any(
+        document["injection_detected"]
+        for document in documents
+    )
+
+    return {
+        "documents": documents,
+        "missing_documents": missing_documents,
+        "low_confidence": low_confidence,
+        "injection_detected": injection_detected,
+        "risks": all_risks,
+    }
+
+
+def save_uploaded_files(
+    uploaded_files,
+    case_id: str,
+) -> listcase_folder = Path("uploads") / case_id
+    case_folder.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    saved_paths = []
+
+    for uploaded_file in uploaded_files:
+        safe_name = Path(
+            uploaded_file.name
+        ).name
+
+        destination = case_folder / safe_name
+
+        destination.write_bytes(
+            uploaded_file.getvalue()
+        )
+
+        saved_paths.append(str(destination))
+
+    return saved_paths

@@ -1,0 +1,8 @@
+TEST DATA ONLY - SYNTHETIC
+
+Document Type: Invoice
+Policy Number: POL-10001
+Claimant Name: John Test Customer
+Invoice Total Amount: 25000.00
+Provider: Test General Hospital
+Service: Covered inpatient treatment

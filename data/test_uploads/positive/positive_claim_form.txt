@@ -1,0 +1,10 @@
+TEST DATA ONLY - SYNTHETIC
+
+Document Type: Claim Form
+Claim Number: CLM-POS-001
+Policy Number: POL-10001
+Claimant Name: John Test Customer
+Claim Type: Health claim
+Claim Amount: 25000.00
+Incident Date: 2026-10-01
+Description: Hospital treatment claim.

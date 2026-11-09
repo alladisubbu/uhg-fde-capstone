@@ -1,0 +1,8 @@
+TEST DATA ONLY - SYNTHETIC
+
+Document Type: Medical Report
+Policy Number: POL-10001
+Claimant Name: John Test Customer
+Diagnosis: Synthetic test diagnosis
+Treatment: Covered inpatient treatment
+Medical Report Status: Complete
